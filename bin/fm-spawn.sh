@@ -81,10 +81,12 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
-#   OpenCode has no interactive effort flag, so its effort is written as the
-#   build agent's variant, keyed to the resolved model, inside the
-#   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
-#   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   OpenCode's interactive `opencode --prompt` launch rejects `--model` (the
+#   installed CLI accepts it only on `opencode run`), so both the resolved model
+#   and its effort ride the OPENCODE_CONFIG_CONTENT JSON its launch already
+#   carries: the model as the config's top-level `model` field, the effort as the
+#   build agent's variant keyed to that same model (config schema:
+#   opencode.ai/config.json). Without a model both axes are recorded but omitted.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -2012,7 +2014,7 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__MODELFLAG____EFFORTFLAG__}'\'' opencode --prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -2535,7 +2537,21 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  opencode)
+    # The interactive `opencode --prompt` launch has no `--model` flag (only
+    # `opencode run` accepts `-m/--model`); the installed CLI rejects the
+    # positional form outright. The resolved model therefore rides the
+    # OPENCODE_CONFIG_CONTENT JSON the launch already writes, as the config's
+    # top-level `model` field (config schema: opencode.ai/config.json, "Model to
+    # use in the format of provider/model"). The fragment lands inside the
+    # launch's single-quoted assignment, so a literal quote in the model id must
+    # close and reopen that quoting.
+    local model_json
+    model_json=$(json_escape "$model")
+    model_json=${model_json//\'/\'\\\'\'}
+    printf ',"model":"%s"' "$model_json"
+    ;;
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2599,19 +2615,20 @@ effort_flag_for_harness() {
   opencode)
     # opencode's interactive `opencode --prompt` launch has no effort flag
     # (`opencode run --variant` is a different, non-interactive mode). Its
-    # config schema (opencode 1.18.32, `opencode debug config` / config.json)
-    # carries per-model reasoning effort as agent.<name>.variant, "Default model
-    # variant for this agent (applies only when using the agent's configured
-    # model)", so the effort rides the OPENCODE_CONFIG_CONTENT JSON the launch
-    # already writes: the default build agent is pinned to the resolved model
-    # and the effort named as its variant, which OpenCode resolves against that
-    # model's own variant list. Those lists are per-provider (anthropic/* expose
-    # high|max, openai/* expose low|medium|high|xhigh), so emit the variant only
-    # when the resolved model's provider is known to expose that effort; any
-    # other provider, or an effort outside its family's list, keeps the
-    # permission-only launch and omits the variant (record-and-omit, as codex
-    # and grok do). Without a resolved model the variant has nothing to key to
-    # and is likewise omitted. The fragment lands inside the launch's
+    # config schema (opencode.ai/config.json, the installed opencode 2.x) carries
+    # per-model reasoning effort as agent.<name>.variant, "Default model variant
+    # for this agent (applies only when using the agent's configured model)", so
+    # the effort rides the OPENCODE_CONFIG_CONTENT JSON the launch already
+    # writes: the resolved model is the config's top-level `model` field (emitted
+    # by model_flag_for_harness), the build agent is pinned to that same model,
+    # and the effort is named as its variant, which OpenCode resolves against
+    # that model's own variant list. Those lists are per-provider (anthropic/*
+    # expose high|max, openai/* expose low|medium|high|xhigh), so emit the
+    # variant only when the resolved model's provider is known to expose that
+    # effort; any other provider, or an effort outside its family's list, keeps
+    # the permission-and-model launch and omits the variant (record-and-omit, as
+    # codex and grok do). Without a resolved model the variant has nothing to key
+    # to and is likewise omitted. The fragment lands inside the launch's
     # single-quoted assignment, so a literal quote in the model id must close and
     # reopen that quoting.
     [ -n "$model" ] && [ "$model" != default ] || return 0
