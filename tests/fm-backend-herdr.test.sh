@@ -1035,20 +1035,31 @@ test_launcher_identity_refuses_a_missing_server_socket() {
   pass "fm_backend_herdr_launcher_identity: refuses a claimed pane without exact server identity"
 }
 
-test_launcher_identity_refuses_a_pane_from_another_server_socket() {
+test_launcher_identity_binds_to_an_injected_socket_from_another_server() {
   local dir log resp fb out status
   dir="$TMP_ROOT/launcher-xsocket"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # 1: session list --json, resolving THIS session's own socket.
+  # 1: session list --json, resolving THIS session's own socket, which is NOT
+  # the injected one. A firstmate primary with its own XDG_CONFIG_HOME always
+  # lands here: the session name resolves against the config root while the
+  # launcher's pane lives in the server herdr injected.
   printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  # 2: the pane read, served by the injected socket rather than the session.
+  printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/2.out"
+  # 3: the tab cross-check.
+  printf '{"result":{"tab":{"tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/3.out"
+  # 4: the workspace label lookup.
+  printf '{"result":{"workspaces":[{"workspace_id":"w7","label":"firstmate"}]}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/other.sock \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest || exit 1
+      printf "%s|%s|%s" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID"' "$ROOT" )
   status=$?
-  expect_code 1 "$status" "a launcher pane on a different herdr server socket must refuse"
-  assert_contains "$out" "cross-session parent identity" "the cross-socket refusal did not explain itself"
-  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get' "a cross-server launcher identity must be refused before its pane is trusted"
-  pass "fm_backend_herdr_launcher_identity: refuses a launcher pane whose injected socket belongs to another herdr server"
+  expect_code 0 "$status" "an injected socket naming a different running server must bind the pane to that server, not refuse"
+  [ "$out" = 'w7:p3|w7:t3|w7' ] \
+    || fail "an injected-socket launcher identity should resolve its exact pane, tab, and workspace, got '$out'"
+  assert_not_contains "$(grep -a 'pane' "$log" | tr -d '\037')" '--session' "an authoritative injected socket must read the pane without re-resolving the session name"
+  pass "fm_backend_herdr_launcher_identity: binds to the injected socket when the session name resolves to a different server"
 }
 
 test_launcher_identity_refuses_an_unreadable_pane() {
@@ -5822,7 +5833,7 @@ test_launcher_identity_absent_when_herdr_env_alone_is_set
 test_launcher_identity_resolves_the_exact_pane_tab_and_workspace
 test_launcher_identity_refuses_a_pane_from_another_session_name
 test_launcher_identity_refuses_a_missing_server_socket
-test_launcher_identity_refuses_a_pane_from_another_server_socket
+test_launcher_identity_binds_to_an_injected_socket_from_another_server
 test_launcher_identity_refuses_an_unreadable_pane
 test_launcher_identity_refuses_a_pane_and_tab_that_disagree
 test_launcher_identity_refuses_a_workspace_missing_from_the_session
