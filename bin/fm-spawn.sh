@@ -5330,6 +5330,14 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
 fi
 sleep 0.3
 SPAWN_LAUNCH_SENT=1
+# Herdr renders a pane only after its tab has been the active tab of a focused
+# workspace once; a `--no-focus` task pane otherwise executes the launch while
+# its terminal stays unreadable, so the worker is invisible and `agent prompt`
+# stalls (Herdr issue #2449). Activate the task endpoint for the delivery and
+# hand focus back right after the Enter. Every other backend is unchanged.
+if [ "$BACKEND" = herdr ]; then
+  fm_backend_herdr_task_rendering_prepare "$T" || true
+fi
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -5337,6 +5345,9 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$BACKEND" = herdr ]; then
+  fm_backend_herdr_task_rendering_restore || true
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
