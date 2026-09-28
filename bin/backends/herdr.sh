@@ -396,22 +396,44 @@ fm_backend_herdr_workspace_label() {
 # pure env/registration-root mismatch check: it never inspects pane topology and
 # never runs a mutating command.
 #
-# Recursion guard: resolving the session socket goes through fm_backend_herdr_cli
-# (session list), which itself consults this helper. While the guard is set, this
-# returns 1 (not authoritative), so the nested call keeps its normal --session
-# targeting; the guard is cleared on every exit path via a RETURN trap.
-fm_backend_herdr_launcher_socket_is_authoritative() {  # <session>
-  local session=$1 claimed_socket session_socket
-  [ "${FM_BACKEND_HERDR_LAUNCHER_SOCKET_GUARD:-}" = 1 ] && return 1
+# Recursion is structurally impossible here, not guarded: resolving the session
+# socket goes through fm_backend_herdr_cli with the `session` subcommand, which
+# the exemption list in fm_backend_herdr_cli treats as session-scoped and so
+# never consults this helper in turn.
+#
+# The verdict is resolved once per (session, injected socket) pair and cached in
+# FM_BACKEND_HERDR_AUTH_*, because every non-exempt CLI call consults it and
+# re-listing sessions per call would add a herdr round trip to every pane read.
+# fm_backend_herdr_launcher_identity shares the same cache instead of resolving
+# the session socket a second time.
+fm_backend_herdr_socket_authority_resolve() {  # <session>
+  local session=$1 claimed_socket
+  if [ "${FM_BACKEND_HERDR_AUTH_COMPUTED:-0}" = 1 ] \
+    && [ "${FM_BACKEND_HERDR_AUTH_SESSION:-}" = "$session" ]; then
+    return 0
+  fi
+  FM_BACKEND_HERDR_AUTH_SESSION=$session
+  FM_BACKEND_HERDR_AUTH_COMPUTED=1
+  FM_BACKEND_HERDR_AUTH_CLAIMED=""
+  FM_BACKEND_HERDR_AUTH_SESSION_SOCKET=""
   claimed_socket=${HERDR_SOCKET_PATH:-}
-  [ -n "$claimed_socket" ] || return 1
-  claimed_socket=$(fm_backend_herdr_canonical_socket_path "$claimed_socket" 2>/dev/null) || return 1
-  FM_BACKEND_HERDR_LAUNCHER_SOCKET_GUARD=1
-  session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session" 2>/dev/null)
-  local rc=$?
-  FM_BACKEND_HERDR_LAUNCHER_SOCKET_GUARD=
-  [ "$rc" -eq 0 ] && [ -n "$session_socket" ] || return 1
-  [ "$claimed_socket" != "$session_socket" ]
+  if [ -n "$claimed_socket" ]; then
+    claimed_socket=$(fm_backend_herdr_canonical_socket_path "$claimed_socket" 2>/dev/null) || claimed_socket=""
+  fi
+  FM_BACKEND_HERDR_AUTH_CLAIMED=$claimed_socket
+  # With no injected socket there is nothing to compare the session's socket
+  # against, so never spend a `session list` on it: the predicate already
+  # requires a non-empty claimed socket.
+  [ -n "$claimed_socket" ] || return 0
+  FM_BACKEND_HERDR_AUTH_SESSION_SOCKET=$(fm_backend_herdr_presentation_session_socket_path "$session" 2>/dev/null) || FM_BACKEND_HERDR_AUTH_SESSION_SOCKET=""
+  return 0
+}
+
+fm_backend_herdr_launcher_socket_is_authoritative() {  # <session>
+  fm_backend_herdr_socket_authority_resolve "$1" || return 1
+  [ -n "${FM_BACKEND_HERDR_AUTH_CLAIMED:-}" ] || return 1
+  [ -n "${FM_BACKEND_HERDR_AUTH_SESSION_SOCKET:-}" ] || return 1
+  [ "${FM_BACKEND_HERDR_AUTH_CLAIMED}" != "${FM_BACKEND_HERDR_AUTH_SESSION_SOCKET}" ]
 }
 
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
@@ -1832,17 +1854,15 @@ fm_backend_herdr_launcher_identity() {  # <session>
   # what points elsewhere. Bind to the injected socket rather than refusing.
   # fm_backend_herdr_cli already honors this same condition by omitting
   # `--session`, so identity and placement agree.
-  if fm_backend_herdr_launcher_socket_is_authoritative "$session"; then
-    :
-  else
-    session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
-      echo "error: herdr session '$session' has no unambiguous socket to match against the launcher pane's own; refusing to place a worker from an unverifiable parent identity" >&2
-      return 1
-    }
-    if [ "$claimed_socket" != "$session_socket" ]; then
-      echo "error: herdr launcher pane '$pane' belongs to the server at '$claimed_socket', not session '$session' at '$session_socket'; refusing to place a worker from a cross-session parent identity" >&2
-      return 1
-    fi
+  # Resolve the session's socket exactly once through the shared authority
+  # cache, then compare: an unresolvable socket has nothing to match the pane's
+  # own server against, and a differing socket means the injected path names the
+  # server this pane actually lives in.
+  fm_backend_herdr_socket_authority_resolve "$session"
+  session_socket=${FM_BACKEND_HERDR_AUTH_SESSION_SOCKET:-}
+  if [ -z "$session_socket" ]; then
+    echo "error: herdr session '$session' has no unambiguous socket to match against the launcher pane's own; refusing to place a worker from an unverifiable parent identity" >&2
+    return 1
   fi
 
   pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || {

@@ -3955,6 +3955,55 @@ kimi_trust_marker_is_present() { # <plain-pane-capture>
   return 1
 }
 
+# OpenCode's interactive `opencode --prompt <brief>` launch loads the brief into
+# the composer but does not submit it, so the Enter that submits it has to land
+# after the TUI is actually reading input. A fixed post-launch sleep is a race:
+# it wins on a backend whose shell is already at the prompt and loses on a slow
+# start, and a lost Enter leaves a fully launched, fully rendered worker sitting
+# idle with its whole brief unsubmitted - which reads exactly like a broken
+# worker.
+#
+# So the launch is gated on the pane itself rather than on a timer. A TUI that
+# has finished painting repeats the same frame across consecutive captures, while
+# a half-drawn or still-loading one keeps changing; two identical non-empty
+# frames is the earliest honest evidence that input will be read.
+#
+# The shared composer classifier is deliberately NOT the signal here: opencode's
+# left-bar composer reads `unknown` against a loaded brief in this launch shape,
+# so waiting on it would only ever burn the timeout.
+opencode_wait_for_composer() {
+  local i=0 max=${FM_OPENCODE_READY_POLLS:-60} interval=${FM_OPENCODE_POLL_INTERVAL:-0.5}
+  local prev="" cur
+  while [ "$i" -lt "$max" ]; do
+    cur=$(fm_backend_capture "$BACKEND" "$T" 40 "$W" 2>/dev/null)
+    if [ -n "$cur" ] && [ "$cur" = "$prev" ]; then
+      return 0
+    fi
+    prev=$cur
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+# A submitted brief puts the agent to work, which is the only signal that proves
+# the Enter was read rather than merely sent. An Enter the TUI was not yet
+# reading is dropped, not queued, so re-send it a bounded number of times and
+# report honestly when none of them took.
+opencode_submit_composer() {
+  local retries=${FM_OPENCODE_SUBMIT_RETRIES:-4}
+  local settle=${FM_OPENCODE_SUBMIT_SETTLE:-3} i state
+  i=0
+  while [ "$i" -lt "$retries" ]; do
+    spawn_send_key "$T" Enter
+    sleep "$settle"
+    i=$((i + 1))
+    state=$(fm_backend_busy_state "$BACKEND" "$T" 2>/dev/null)
+    [ "$state" = busy ] && return 0
+  done
+  return 1
+}
+
 # A successful key send is not evidence that Kimi accepted trust. Only the
 # ordinary readiness signals in a later capture prove advancement.
 kimi_ready_signal_is_present() { # <plain-pane-capture>
@@ -5339,12 +5388,28 @@ if [ "$BACKEND" = herdr ]; then
   fm_backend_herdr_task_rendering_prepare "$T" || true
 fi
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
+# OpenCode holds the brief unsubmitted until the TUI is reading input, so its
+# Enter is gated on the composer proving the load. Every other harness keeps the
+# fixed settle it has always used.
+if [ "$HARNESS" = opencode ]; then
+  if ! opencode_wait_for_composer; then
+    echo "warning: $ID's opencode TUI did not settle before its submit window closed; submitting anyway" >&2
+  fi
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+if [ "$HARNESS" = opencode ]; then
+  # Never silently report a launch that did not start: an unsubmitted brief
+  # leaves a rendered worker that looks healthy and does nothing.
+  if ! opencode_submit_composer; then
+    echo "warning: $ID launched but its brief is still unsubmitted after every Enter attempt; the worker is idle until a steer submits it" >&2
+  fi
+else
+  spawn_send_key "$T" Enter
+fi
 if [ "$BACKEND" = herdr ]; then
   fm_backend_herdr_task_rendering_restore || true
 fi
