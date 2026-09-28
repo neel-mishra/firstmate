@@ -384,30 +384,85 @@ fm_backend_herdr_workspace_label() {
 # compatible if a future herdr build honors it. Never used by
 # fm_backend_herdr_version_check, which is intentionally session-independent
 # (reads only .client.* fields).
+# fm_backend_herdr_launcher_socket_is_authoritative: true (0) when the injected
+# HERDR_SOCKET_PATH names a running server DIFFERENT from the socket <session>
+# resolves to under the current XDG_CONFIG_HOME. A firstmate primary running
+# with an XDG_CONFIG_HOME override (its own isolated config root) resolves
+# <session> to a separate, usually empty server, while its pane lives in the
+# server named by HERDR_SOCKET_PATH; passing `--session <name>` then re-resolves
+# against the config root and silently targets the wrong (empty) server. When
+# this returns 0, fm_backend_herdr_cli must omit `--session` so the injected
+# socket binds the call to the server the pane actually lives in. This is a
+# pure env/registration-root mismatch check: it never inspects pane topology and
+# never runs a mutating command.
+#
+# Recursion guard: resolving the session socket goes through fm_backend_herdr_cli
+# (session list), which itself consults this helper. While the guard is set, this
+# returns 1 (not authoritative), so the nested call keeps its normal --session
+# targeting; the guard is cleared on every exit path via a RETURN trap.
+fm_backend_herdr_launcher_socket_is_authoritative() {  # <session>
+  local session=$1 claimed_socket session_socket
+  [ "${FM_BACKEND_HERDR_LAUNCHER_SOCKET_GUARD:-}" = 1 ] && return 1
+  claimed_socket=${HERDR_SOCKET_PATH:-}
+  [ -n "$claimed_socket" ] || return 1
+  claimed_socket=$(fm_backend_herdr_canonical_socket_path "$claimed_socket" 2>/dev/null) || return 1
+  FM_BACKEND_HERDR_LAUNCHER_SOCKET_GUARD=1
+  session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session" 2>/dev/null)
+  local rc=$?
+  FM_BACKEND_HERDR_LAUNCHER_SOCKET_GUARD=
+  [ "$rc" -eq 0 ] && [ -n "$session_socket" ] || return 1
+  [ "$claimed_socket" != "$session_socket" ]
+}
+
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   local session=$1 rc=0 err failed_bin selected_bin client_bin=herdr
+  local use_session=1
   shift
   if [ "${FM_BACKEND_HERDR_CLIENT_SESSION:-}" = "$session" ]; then
     client_bin=$(fm_backend_herdr_bin)
   fi
+  # When the launcher's injected socket names a different running server than
+  # <session> resolves to under this process's XDG_CONFIG_HOME, target the
+  # injected socket instead of the session name: `--session` would re-resolve
+  # against the config root and hit the wrong (empty) server. See
+  # fm_backend_herdr_launcher_socket_is_authoritative above. `status` and
+  # `server` are exempt: they are session-scoped lifecycle reads/launches that
+  # fm_backend_herdr_server_ensure owns, and `status --json` without --session
+  # does not reliably report the session-scoped server state this call needs.
+  case "${1:-}" in
+  status | server | session) ;;
+  *) fm_backend_herdr_launcher_socket_is_authoritative "$session" && use_session=0 ;;
+  esac
   # stderr is buffered (stdout streams untouched) so a protocol_mismatch
   # refusal can be recognized and retried once on a compatible client; see
   # "client selection" below. A failed command's stderr is replayed verbatim.
   # The long-lived `server` launch is exec'd straight through: buffering its
   # stderr would hold this call open for the server's whole lifetime.
   if [ "${1:-}" = server ]; then
-    HERDR_SESSION="$session" "$client_bin" "$@" --session "$session"
+    if [ "$use_session" = 1 ]; then
+      HERDR_SESSION="$session" "$client_bin" "$@" --session "$session"
+    else
+      HERDR_SESSION="$session" "$client_bin" "$@"
+    fi
     return $?
   fi
   failed_bin=$client_bin
-  { err=$(HERDR_SESSION="$session" "$failed_bin" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
+  if [ "$use_session" = 1 ]; then
+    { err=$(HERDR_SESSION="$session" "$failed_bin" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
+  else
+    { err=$(HERDR_SESSION="$session" "$failed_bin" "$@" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
+  fi
   if [ "$rc" -ne 0 ]; then
     case "$err" in
       *protocol_mismatch*)
         fm_backend_herdr_client_select "$session" force
         selected_bin=$(fm_backend_herdr_bin)
         if [ "$selected_bin" != "$failed_bin" ]; then
-          HERDR_SESSION="$session" "$selected_bin" "$@" --session "$session"
+          if [ "$use_session" = 1 ]; then
+            HERDR_SESSION="$session" "$selected_bin" "$@" --session "$session"
+          else
+            HERDR_SESSION="$session" "$selected_bin" "$@"
+          fi
           return $?
         fi
         ;;
@@ -1770,13 +1825,24 @@ fm_backend_herdr_launcher_identity() {  # <session>
     echo "error: herdr launcher pane '$pane' reports an unusable socket path; refusing to place a worker from an unverifiable parent identity" >&2
     return 1
   }
-  session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
-    echo "error: herdr session '$session' has no unambiguous socket to match against the launcher pane's own; refusing to place a worker from an unverifiable parent identity" >&2
-    return 1
-  }
-  if [ "$claimed_socket" != "$session_socket" ]; then
-    echo "error: herdr launcher pane '$pane' belongs to the server at '$claimed_socket', not session '$session' at '$session_socket'; refusing to place a worker from a cross-session parent identity" >&2
-    return 1
+  # The injected socket is the authoritative server identity when it names a
+  # different running server than <session> resolves to under this process's
+  # XDG_CONFIG_HOME: a primary running with an isolated config root still lives
+  # in the server named by HERDR_SOCKET_PATH, and the session-name resolution is
+  # what points elsewhere. Bind to the injected socket rather than refusing.
+  # fm_backend_herdr_cli already honors this same condition by omitting
+  # `--session`, so identity and placement agree.
+  if fm_backend_herdr_launcher_socket_is_authoritative "$session"; then
+    :
+  else
+    session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+      echo "error: herdr session '$session' has no unambiguous socket to match against the launcher pane's own; refusing to place a worker from an unverifiable parent identity" >&2
+      return 1
+    }
+    if [ "$claimed_socket" != "$session_socket" ]; then
+      echo "error: herdr launcher pane '$pane' belongs to the server at '$claimed_socket', not session '$session' at '$session_socket'; refusing to place a worker from a cross-session parent identity" >&2
+      return 1
+    fi
   fi
 
   pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || {
