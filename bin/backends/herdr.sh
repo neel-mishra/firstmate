@@ -68,7 +68,7 @@
 # default (the firstmate repo root - never a secondmate home, so
 # fm_backend_herdr_workspace_label falls through to "firstmate" exactly like
 # pre-P3 behavior when a test does not care about home-specific labeling).
-FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+FM_BACKEND_HERDR_ROOT="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
@@ -3122,6 +3122,57 @@ fm_backend_herdr_send_literal() {  # <target> <text>
   err=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" 2>&1 >/dev/null) || rc=$?
   [ "$rc" -eq 0 ] || [ -z "$err" ] || printf '%s\n' "$err" >&2
   return "$rc"
+}
+
+# fm_backend_herdr_task_rendering_prepare: make a freshly created Herdr task
+# pane that was opened with `--no-focus` actually render.
+#
+# A pane whose tab has never been the active tab of a focused workspace is not
+# rendered by Herdr: input still executes (an external side effect proves it),
+# but `pane read` returns empty, Herdr's screen-based agent state never observes
+# the agent, and `agent prompt`/`pane send-keys enter` appear to do nothing
+# (Herdr issue #2449; the maintainer confirmed `pane run` executes while an
+# inactive pane keeps no rendered output, and that output produced while the tab
+# was active is retained after it loses focus). The tmux backend has no such
+# dependency because `tmux capture-pane` reads the live pane terminal.
+#
+# So the spawn activates the task tab immediately before delivering the launch
+# command, then calls fm_backend_herdr_task_rendering_restore to put the
+# captain's exact prior workspace and tab back. `tab focus` also focuses the
+# tab's workspace (verified against a real foreground client), which is what
+# materializes the pane; the snapshot is best-effort, so a session whose focus
+# cannot be read still activates and simply stays on the task.
+fm_backend_herdr_task_rendering_prepare() {  # <target>
+  local session pane out workspace tab snapshot
+  FM_BACKEND_HERDR_TASK_RENDERING_SESSION=
+  FM_BACKEND_HERDR_TASK_RENDERING_SNAPSHOT=
+  fm_backend_herdr_parse_target "$1" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  fm_backend_herdr_server_ensure "$session" || return 1
+  out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  workspace=$(printf '%s' "$out" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
+  tab=$(printf '%s' "$out" | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
+  [ -n "$workspace" ] && [ -n "$tab" ] || return 1
+  snapshot=$(fm_backend_herdr_projection_focus_snapshot "$session") || snapshot=
+  FM_BACKEND_HERDR_TASK_RENDERING_SESSION=$session
+  FM_BACKEND_HERDR_TASK_RENDERING_SNAPSHOT=$snapshot
+  fm_backend_herdr_cli "$session" tab focus "$tab" >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# fm_backend_herdr_task_rendering_restore: return the exact prior focused
+# workspace and tab after a task activation. Best-effort and idempotent: a
+# prepare that captured no unambiguous snapshot leaves focus on the task, and a
+# focus that already matches the snapshot is a no-op.
+fm_backend_herdr_task_rendering_restore() {
+  local session=${FM_BACKEND_HERDR_TASK_RENDERING_SESSION:-}
+  local snapshot=${FM_BACKEND_HERDR_TASK_RENDERING_SNAPSHOT:-}
+  FM_BACKEND_HERDR_TASK_RENDERING_SESSION=
+  FM_BACKEND_HERDR_TASK_RENDERING_SNAPSHOT=
+  [ -n "$session" ] || return 0
+  [ -n "$snapshot" ] || return 0
+  fm_backend_herdr_projection_focus_restore "$session" "$snapshot" "task rendering activation" || return 1
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,

@@ -115,7 +115,11 @@ Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.s
 
 Workspace and tab creation use `--no-focus`.
 The first workspace in a completely empty Herdr session must become focused, because no prior target exists.
-Later task creation does not intentionally steal focus.
+
+Herdr does not render a pane until its tab has been the active tab of a focused workspace at least once.
+Until then the launch still executes, but `pane read` returns empty and Herdr's screen-based agent state never observes the worker, so `agent prompt` stalls (Herdr issue #2449).
+The spawn therefore activates the task tab immediately before it delivers the launch command, then restores the exact previously focused workspace and tab right after the Enter.
+That activation is the only intentional, momentary focus change task creation makes; a session whose prior focus cannot be read unambiguously stays on the task rather than guessing.
 
 ### Placement beside the launcher
 

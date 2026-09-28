@@ -3758,6 +3758,50 @@ test_send_key_normalizes_and_targets_pane() {
   pass "fm_backend_herdr_send_key: normalizes the key and targets the right pane"
 }
 
+# --- task rendering activation (Herdr issue #2449) ---------------------------
+#
+# A Herdr pane opened with `--no-focus` is not rendered until its tab has been
+# the active tab of a focused workspace once: the launch still executes, but
+# `pane read` stays empty and Herdr's screen-based agent state cannot observe
+# the worker, so `agent prompt` stalls. The spawn therefore activates the task
+# tab before delivering the launch and restores the exact prior focus after.
+# These cases pin that mechanism with a canned fake CLI.
+
+test_task_rendering_prepare_activates_the_task_tab() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/task-render-prepare"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false}]}}\n' > "$resp/2.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true},{"tab_id":"w1:t2","focused":false}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_rendering_prepare default:w1:p2 && printf "%s" "$FM_BACKEND_HERDR_TASK_RENDERING_SNAPSHOT"' "$ROOT" )
+  expect_code 0 $? "task rendering prepare should succeed"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''focus'$'\x1f''w1:t2' "prepare did not activate the task tab"
+  [ "$out" = $'w1\tw1:t1' ] || fail "prepare did not snapshot the prior focused workspace and tab, got '$out'"
+  pass "fm_backend_herdr_task_rendering_prepare: activates the task tab and snapshots the prior focus"
+}
+
+test_task_rendering_restore_returns_to_the_prior_tab() {
+  local dir log resp fb
+  dir="$TMP_ROOT/task-render-restore"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false}]}}\n' > "$resp/2.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true},{"tab_id":"w1:t2","focused":false}]}}\n' > "$resp/3.out"
+  # After activation the task tab is active, so restore must move focus back.
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false}]}}\n' > "$resp/5.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","focused":false},{"tab_id":"w1:t2","focused":true}]}}\n' > "$resp/6.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1"}}}\n' > "$resp/7.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false}]}}\n' > "$resp/9.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true},{"tab_id":"w1:t2","focused":false}]}}\n' > "$resp/10.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_rendering_prepare default:w1:p2 && fm_backend_herdr_task_rendering_restore' "$ROOT"
+  expect_code 0 $? "task rendering restore should succeed"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''focus'$'\x1f''w1:t1' "restore did not return to the exact prior tab"
+  pass "fm_backend_herdr_task_rendering_restore: puts the exact prior workspace and tab back"
+}
+
 test_kill_is_best_effort() {
   local dir log resp fb
   dir="$TMP_ROOT/kill"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5877,6 +5921,8 @@ test_normalize_key
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
+test_task_rendering_prepare_activates_the_task_tab
+test_task_rendering_restore_returns_to_the_prior_tab
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
