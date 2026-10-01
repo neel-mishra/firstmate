@@ -324,6 +324,52 @@ SH
   pass "a declared OPENCODE_BIN is launched by absolute path"
 }
 
+# A pinned opencode launch must keep the binary path and `--prompt` as separate
+# words. Two regressions met here: a missing space fused them into one token
+# (`'<bin>'--prompt`), and the config's resolved-model fragment leaked a stray
+# `,"model":"..."` token between them (`'<bin>' ,"model":"..."--prompt`). Both
+# leave the worker unlaunched or launched without its brief, so pin the exact
+# adjacency and prove the pinned binary is the process that runs.
+test_opencode_launch_separates_pinned_binary_from_prompt() {
+  local rec id out status launch bin args
+  id=worker-env-opencode-spacing-a1
+  rec=$(make_spawn_case worker-env-opencode-spacing opencode "$id")
+  read_case "$rec"
+  bin="$HOME_DIR/pinned/opencode"
+  mkdir -p "$HOME_DIR/pinned"
+  cat > "$bin" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FM_FAKE_OPENCODE_ARGS"
+SH
+  chmod +x "$bin"
+  write_worker_env "$HOME_DIR/config" "OPENCODE_BIN=$bin"
+
+  # A resolved model drives the config JSON's model fragment, the path that
+  # previously leaked the stray token before --prompt.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --model anthropic/claude-sonnet-4-5)
+  status=$?
+  expect_code 0 "$status" "pinned opencode spawn with a model should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$bin' --prompt" \
+    "the constructed opencode launch must separate the pinned binary from --prompt"
+  assert_not_contains "$launch" "'$bin' ," \
+    "the resolved model fragment must not leak out of the config JSON before --prompt"
+  assert_contains "$launch" "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}'" \
+    "the resolved model must still ride the config JSON, not the command line"
+
+  # Executing the emitted launch must reach the pinned binary with --prompt as
+  # its first argument: the behavioral proof that path and flag are apart.
+  args="$HOME_DIR/opencode-args"
+  env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm TMUX=synthetic-pane \
+    FM_FAKE_OPENCODE_ARGS="$args" \
+    /bin/sh -c "$launch" || fail "the constructed opencode launch failed to run the pinned binary"
+  assert_present "$args" "the pinned opencode binary was not executed"
+  assert_equals "--prompt" "$(sed -n '1p' "$args")" \
+    "the pinned opencode binary must receive --prompt as its first argument"
+  pass "the opencode launch runs the pinned binary with --prompt separated from its path"
+}
+
 test_other_harnesses_keep_their_launch() {
   local rec id out status launch
   id=worker-env-codex-a1
@@ -366,5 +412,6 @@ test_detector_flags_primary_worktree_root
 test_opencode_launch_carries_the_worker_environment
 test_opencode_launch_executes_with_the_declared_environment
 test_opencode_launch_uses_a_declared_binary
+test_opencode_launch_separates_pinned_binary_from_prompt
 test_other_harnesses_keep_their_launch
 test_malformed_worker_env_refuses_before_metadata
