@@ -1,7 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import { shouldArm } from "./lib/fm-watch-arm-predicate.js";
 
 // Supervision host: a home opted in with config/supervision-host
 // (docs/configuration.md "Supervision host" owns the opt-in) spawns
@@ -114,16 +115,6 @@ async function isPrimaryRoot(root, home) {
   const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
   if (gitDir.code !== 0 || commonDir.code !== 0) return false;
   return gitDir.stdout.trim() === commonDir.stdout.trim();
-}
-
-function shouldArm(paths) {
-  if (existsSync(`${paths.state}/.afk`)) return false;
-  if (existsSync(`${paths.config}/x-mode.env`)) return true;
-  try {
-    return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
-  } catch {
-    return false;
-  }
 }
 
 async function sessionOwnsLock(paths) {
