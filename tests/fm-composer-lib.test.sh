@@ -746,6 +746,39 @@ test_matrix_opencode_leftbar_signals() {
   pass "matrix: opencode's left-bar composer reads empty everywhere and scans the full active run"
 }
 
+test_matrix_opencode_1x_two_line_status_footer() {
+  # Real opencode 1.18.4 on Herdr (captured live 2026-10-02): its status footer
+  # is a TWO-line block directly below the half-block floor, where 2.x uses one
+  # row. Line 1 is the cwd/branch cell carrying a `(NN%)` context-progress cell
+  # and a `ctrl+p` hint; line 2 ends in `commands`. Before this rule the single
+  # row read just below the floor was neither an edge nor an opencode 2.x status
+  # row, so the staleness probe refused, SELECTED_KIND was cleared, and every
+  # healthy idle 1.x pane read `unknown` - which blocked fm-control's relaunch
+  # and exit. The footer rows are bytes from that capture, one row per line.
+  local idle typed captured_1x_typed footer
+  footer=$'/Users/me/mesh-3edfc5/00.1K (20%) · $0.ctrl+p\n7/mesh  shift+tab agents  ctrl+p  commands'
+  idle=$'  ┃\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n'"$footer"
+  assert_screen "opencode 1.18.4 idle two-line footer on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "opencode 1.18.4 idle two-line footer on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "opencode 1.18.4 idle two-line footer on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  # The protection this must NOT remove: real unsubmitted text in the same
+  # composer, above that same two-line footer, still refuses.
+  captured_1x_typed=$'  ┃\n  ┃  '"${ESC}[38;2;255;255;255mReply with OK.${ESC}[38;2;255;255;255m"$'\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n'"$footer"
+  assert_screen "opencode 1.18.4 typed above two-line footer on herdr" pending "$CAPS_STYLED" "$captured_1x_typed"
+  # Plain captures cannot prove styling, so the same typed draft degrades to
+  # unknown rather than fabricating pending - the dangerous direction is closed.
+  typed=$'  ┃\n  ┃  refactor the parser please\n  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n'"$footer"
+  assert_screen "opencode 1.18.4 typed above two-line footer on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
+  # A bare `commands` row directly below the floor, with no recognized head,
+  # is NOT furniture: the weaker tail token must never stand alone and let a
+  # lower live shape through.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" \
+    $'  ┃\n  ┃  Build · DeepSeek V4.1 Flash OpenCode Go\n  ╹▀▀▀▀▀▀▀▀\n  commands')
+  [ "$out" != empty ] \
+    || fail "a bare 'commands' row with no recognized head must not prove an empty composer, got '$out'"
+  pass "matrix: opencode 1.x's two-line status footer is left-bar furniture, not a lower live shape"
+}
+
 test_matrix_grok_titled_bottom_border() {
   # Grok 1.0.5 widened its titled BOTTOM border three columns past the top and
   # content rows. This is the idle capture from issue #3436; Herdr has no
@@ -1022,6 +1055,7 @@ test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
+test_matrix_opencode_1x_two_line_status_footer
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump

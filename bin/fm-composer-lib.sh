@@ -489,6 +489,21 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)([[:space:]]+[^·[:space:]]+
 # The hints are matched as a conjunction of opencode's own tokens so an
 # arbitrary non-blank row still reads as the live lower shape and refuses.
 FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT='shift\+tab[[:space:]]+agents.*ctrl\+p[[:space:]]+commands'
+# Opencode 1.x (verified live, 1.18.4 through Herdr) draws its status footer as a
+# TWO-line block directly BELOW the half-block floor, where 2.x uses one:
+#   line 1  `…/mesh-3edfc5/00.1K (20%) · $0.ctrl+p`   a cwd/branch cell with a
+#           `(NN%)` context-progress cell and a `ctrl+p` hint;
+#   line 2  `7/mesh  …  commands`                       a cell ending in
+#           `commands` (and possibly a mode/agents hint).
+# Both lines are composer furniture, so a left bar's staleness probe must resume
+# past the whole block exactly as it resumes past 2.x's single row. Each line is
+# matched as a conjunction of opencode's own tokens - the progress cell AND the
+# keybinding hint on line 1, the trailing `commands` cell on line 2 - so an
+# arbitrary non-blank row still reads as the live lower shape and refuses. Line 2
+# only ever counts immediately beneath a recognized line 1 (see the boundary
+# probe), so the weaker tail token can never stand alone.
+FM_COMPOSER_OPENCODE_STATUS_1X_HEAD_RE_DEFAULT='\([0-9]+%\).*ctrl\+p'
+FM_COMPOSER_OPENCODE_STATUS_1X_TAIL_RE_DEFAULT='commands[[:space:]]*$'
 # Claude draws its permission-mode hint on its own row directly below the
 # composer (` ⏵⏵ bypass permissions on (shift+tab to cycle)`, ` ⏵⏵ accept edits
 # on`, ` ⏸ plan mode on`; verified live through Herdr on claude 2.1.236). The
@@ -1231,6 +1246,20 @@ _fm_composer_row_is_opencode_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_STATUS_RE:-$FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_row_is_opencode_status_1x_head / _1x_tail: 0 for the two
+# lines of opencode 1.x's status footer block (the two regexes above). The head
+# carries the progress cell plus the `ctrl+p` hint; the tail carries the trailing
+# `commands` cell. A caller accepts the tail only directly beneath an accepted
+# head, so the pair is a genuine conjunction of opencode tokens and the weaker
+# tail token never reads furniture on its own.
+_fm_composer_row_is_opencode_status_1x_head() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_STATUS_1X_HEAD_RE:-$FM_COMPOSER_OPENCODE_STATUS_1X_HEAD_RE_DEFAULT}" sensitive
+}
+
+_fm_composer_row_is_opencode_status_1x_tail() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_STATUS_1X_TAIL_RE:-$FM_COMPOSER_OPENCODE_STATUS_1X_TAIL_RE_DEFAULT}" sensitive
+}
+
 # _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
 # non-whitespace content is entirely braille cells (fm_composer_strip_braille
 # above) - an animation row that never counts as typed content and bounds a
@@ -1541,16 +1570,28 @@ _fm_composer_select_cursorless() {
       if _fm_composer_leftbar_floor_row "$trimmed"; then
         boundary=$next
       fi
-      # opencode 2.x draws a status row (directory:branch + keybinding hints)
-      # directly below the floor. It is the left bar's own furniture, not a
-      # lower live shape, so the staleness probe resumes past it too; without
-      # this an idle 2.x pane reads `unknown` on every cursorless backend.
+      # opencode draws its status footer directly below the floor. 2.x uses a
+      # single row (directory:branch + keybinding hints); 1.x uses a two-line
+      # block (a `(NN%)`/`ctrl+p` progress cell, then a row ending in
+      # `commands`). It is the left bar's own furniture, not a lower live shape,
+      # so the staleness probe resumes past it too; without this an idle
+      # opencode pane reads `unknown` on every cursorless backend.
       next=$((boundary + 1))
       raw=$(_fm_composer_screen_row "$next" "$plain")
       trimmed=$raw
       fm_composer_normalize_trim_var trimmed
       if _fm_composer_row_is_opencode_status "$trimmed"; then
         boundary=$next
+      elif _fm_composer_row_is_opencode_status_1x_head "$trimmed"; then
+        boundary=$next
+        # The 1.x block's second line is furniture only as the head's own tail.
+        next=$((boundary + 1))
+        raw=$(_fm_composer_screen_row "$next" "$plain")
+        trimmed=$raw
+        fm_composer_normalize_trim_var trimmed
+        if _fm_composer_row_is_opencode_status_1x_tail "$trimmed"; then
+          boundary=$next
+        fi
       fi
     fi
     # The same footer zone, read from the other side: rows this envelope's own
