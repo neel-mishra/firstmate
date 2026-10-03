@@ -489,6 +489,22 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)([[:space:]]+[^·[:space:]]+
 # The hints are matched as a conjunction of opencode's own tokens so an
 # arbitrary non-blank row still reads as the live lower shape and refuses.
 FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT='shift\+tab[[:space:]]+agents.*ctrl\+p[[:space:]]+commands'
+# Opencode 1.x draws a TWO-LINE status footer directly BELOW the half-block
+# floor instead of the 2.x single row: line 1 is a directory/branch cell
+# carrying a `(NN%)` context-usage progress cell and a `ctrl+p` hint
+# (`…/mesh-3edfc5/00.1K (20%) · $0.ctrl+p`), line 2 ends in the `commands`
+# keybinding label and may carry a mode/agents hint (`7/mesh … commands`;
+# verified live on opencode 1.18.4 via herdr). Both rows are composer
+# furniture, so a left bar's staleness probe must resume past them exactly as
+# it does past the floor row and the 2.x status row; without this an idle 1.x
+# pane reads `unknown` on every cursorless backend and fm-control can never
+# relaunch or exit the worker. Each line is matched as a conjunction of
+# opencode's own tokens - the progress cell together with the `ctrl+p`
+# keybinding on line 1, and the trailing `commands` keybinding label on line 2 -
+# never as loose free text, so an arbitrary non-blank row still reads as the
+# live lower shape and refuses.
+FM_COMPOSER_OPENCODE_STATUS_1X_LINE1_RE_DEFAULT='\([0-9]+%\).*ctrl\+p'
+FM_COMPOSER_OPENCODE_STATUS_1X_LINE2_RE_DEFAULT='commands$'
 # Claude draws its permission-mode hint on its own row directly below the
 # composer (` ⏵⏵ bypass permissions on (shift+tab to cycle)`, ` ⏵⏵ accept edits
 # on`, ` ⏸ plan mode on`; verified live through Herdr on claude 2.1.236). The
@@ -1231,6 +1247,18 @@ _fm_composer_row_is_opencode_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_STATUS_RE:-$FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_row_is_opencode_status_1x_line1/2: 0 when the trimmed row is the
+# matching line of opencode 1.x's TWO-LINE status footer
+# (FM_COMPOSER_OPENCODE_STATUS_1X_LINE{1,2}_RE_DEFAULT above). Both lines must
+# match together for the pair to count as the left bar's furniture.
+_fm_composer_row_is_opencode_status_1x_line1() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_STATUS_1X_LINE1_RE:-$FM_COMPOSER_OPENCODE_STATUS_1X_LINE1_RE_DEFAULT}" sensitive
+}
+
+_fm_composer_row_is_opencode_status_1x_line2() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_STATUS_1X_LINE2_RE:-$FM_COMPOSER_OPENCODE_STATUS_1X_LINE2_RE_DEFAULT}" sensitive
+}
+
 # _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
 # non-whitespace content is entirely braille cells (fm_composer_strip_braille
 # above) - an animation row that never counts as typed content and bounds a
@@ -1453,7 +1481,7 @@ _fm_composer_locate_footer_zone() {  # <plain>
 }
 
 _fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
+  local plain=$1 generic=-1 next boundary raw trimmed line1 line2 glyph bare footer=0
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1551,6 +1579,17 @@ _fm_composer_select_cursorless() {
       fm_composer_normalize_trim_var trimmed
       if _fm_composer_row_is_opencode_status "$trimmed"; then
         boundary=$next
+      else
+        # opencode 1.x draws a TWO-LINE status footer below the floor instead
+        # (see FM_COMPOSER_OPENCODE_STATUS_1X_* above). Both rows are the left
+        # bar's own furniture, so resume past the pair exactly as for 2.x.
+        line1=$trimmed
+        line2=$(_fm_composer_screen_row "$((next + 1))" "$plain")
+        fm_composer_normalize_trim_var line2
+        if _fm_composer_row_is_opencode_status_1x_line1 "$line1" \
+           && _fm_composer_row_is_opencode_status_1x_line2 "$line2"; then
+          boundary=$((next + 1))
+        fi
       fi
     fi
     # The same footer zone, read from the other side: rows this envelope's own
