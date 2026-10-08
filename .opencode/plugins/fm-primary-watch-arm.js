@@ -3,6 +3,12 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 import { shouldArm } from "./lib/fm-watch-arm-predicate.js";
+import {
+  isOpenCode2TurnEnd,
+  openCode2Client,
+  openCode2Root,
+  openCode2SessionID,
+} from "./lib/fm-opencode-v2.js";
 
 // Supervision host: a home opted in with config/supervision-host
 // (docs/configuration.md "Supervision host" owns the opt-in) spawns
@@ -513,19 +519,56 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
   return armAttempt(await waitForArmReady(armChild), armChild, includeArmChild);
 }
 
-export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
+// Shared by both harness APIs: publish the coordinator the turn-end guard uses
+// and return the arm entry point.
+async function registerCoordinator({ client, root }) {
   const paths = effectivePaths(root);
   globalThis[COORDINATOR_KEY] = {
     ensureArmed: (sessionID, activeClient) => ensureArm(paths, sessionID, activeClient ?? client),
   };
+  return {
+    armFor: (sessionID) => void ensureArm(paths, sessionID, client),
+  };
+}
+
+// OpenCode 1.x: the loader calls this factory and wires the returned hooks.
+export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
+  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
+  const { armFor } = await registerCoordinator({ client, root });
 
   return {
     event: async ({ event }) => {
       if (event.type !== "session.idle") return;
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
-      void ensureArm(paths, sessionID, client);
+      armFor(sessionID);
     },
   };
+};
+
+// OpenCode 2.x: the loader calls setup(context) and the 2.x event stream is
+// subscribed directly.
+async function setupWatchArm(context) {
+  if (typeof context?.event?.subscribe !== "function") return;
+  const { armFor } = await registerCoordinator({
+    client: openCode2Client(context),
+    root: openCode2Root(context),
+  });
+  void (async () => {
+    try {
+      for await (const event of context.event.subscribe()) {
+        if (!isOpenCode2TurnEnd(event)) continue;
+        const sessionID = openCode2SessionID(event);
+        if (sessionID) armFor(sessionID);
+      }
+    } catch {
+      // OpenCode owns the event stream; a closed stream ends continuity arming.
+    }
+  })();
+}
+
+export default {
+  id: "fm.primary.watch-arm",
+  server: FmPrimaryWatchArm,
+  setup: setupWatchArm,
 };
