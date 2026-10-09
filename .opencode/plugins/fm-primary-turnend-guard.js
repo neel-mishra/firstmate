@@ -2,6 +2,12 @@ import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import {
+  isOpenCode2TurnEnd,
+  openCode2Client,
+  openCode2Root,
+  openCode2SessionID,
+} from "./lib/fm-opencode-v2.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 
@@ -54,6 +60,35 @@ async function letWatchArmRun(sessionID, client) {
   return status === "armed" || status === "wake" || status === "failed";
 }
 
+// Shared by both harness APIs: when the watcher is not already covering this
+// session, run the guard and deliver its recovery follow-up once.
+async function handleTurnEnd(root, client, sessionID) {
+  if (await letWatchArmRun(sessionID, client)) return;
+
+  const result = await runGuard(root);
+  if (result.code !== 2) return;
+
+  try {
+    const text = await encodeFirstmateOperationalInput(
+      root,
+      "turn-end-guard",
+      "TURN WOULD END BLIND - supervision is off. " +
+        "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
+        result.stderr,
+    );
+    await client.session.promptAsync({
+      path: { id: sessionID },
+      body: {
+        parts: [{ type: "text", text }],
+      },
+    });
+    skipNextIdle = true;
+  } catch {
+    skipNextIdle = false;
+  }
+}
+
+// OpenCode 1.x: the loader calls this factory and wires the returned hooks.
 export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => {
   const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
 
@@ -69,29 +104,37 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
 
-      if (await letWatchArmRun(sessionID, client)) return;
-
-      const result = await runGuard(root);
-      if (result.code !== 2) return;
-
-      try {
-        const text = await encodeFirstmateOperationalInput(
-          root,
-          "turn-end-guard",
-          "TURN WOULD END BLIND - supervision is off. " +
-            "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-            result.stderr,
-        );
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text }],
-          },
-        });
-        skipNextIdle = true;
-      } catch {
-        skipNextIdle = false;
-      }
+      await handleTurnEnd(root, client, sessionID);
     },
   };
+};
+
+// OpenCode 2.x: the loader calls setup(context); subscribe to its turn-end
+// events directly.
+async function setupTurnendGuard(context) {
+  if (typeof context?.event?.subscribe !== "function") return;
+  const root = openCode2Root(context);
+  const client = openCode2Client(context);
+  void (async () => {
+    try {
+      for await (const event of context.event.subscribe()) {
+        if (!isOpenCode2TurnEnd(event)) continue;
+        if (skipNextIdle) {
+          skipNextIdle = false;
+          continue;
+        }
+        const sessionID = openCode2SessionID(event);
+        if (!sessionID) continue;
+        await handleTurnEnd(root, client, sessionID);
+      }
+    } catch {
+      // OpenCode owns the event stream; a closed stream ends guard delivery.
+    }
+  })();
+}
+
+export default {
+  id: "fm.primary.turnend-guard",
+  server: FmPrimaryTurnendGuard,
+  setup: setupTurnendGuard,
 };

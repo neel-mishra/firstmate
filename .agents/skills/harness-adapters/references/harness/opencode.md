@@ -43,3 +43,8 @@ On native Windows, the operational-input adapter runs its Bash helper through `b
 
 The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it with `client.session.promptAsync`, and coordinates with the guard before a blind-turn follow-up.
 The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing from `tool.execute.before`.
+
+OpenCode 2.0.16 loads each `.opencode/plugins/*.js` file as a plugin whose default export is `{ id, server, setup }`, and rejects the 1.x plain named-export factory with "Plugin must export a default definition with an id and an effect or setup function".
+The 1.x loader calls `server` (the existing `{ client, directory, worktree }` factory); the 2.x loader calls `setup(context)`.
+The 2.x context exposes `event.subscribe()` (every event, filtered by `type`; a turn ends with `session.execution.succeeded`/`failed`/`interrupted`, not `session.idle`), `session.prompt({ sessionID, text })`, and `tool.hook("execute.before", ...)` (the 2.x shell tool is named `shell`, and throwing blocks).
+The tracked plugins stay valid on both loaders through the `server` plus `setup` default export, and `.opencode/plugins/lib/fm-opencode-v2.js` owns the 1.x-shaped client and event adapter.

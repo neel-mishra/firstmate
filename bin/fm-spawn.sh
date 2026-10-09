@@ -4651,6 +4651,66 @@ export const FmBusyState = async () => {
     },
   };
 };
+// OpenCode 2.x: the loader calls setup(context) and the event stream carries
+// data.sessionID with session.execution.* turn boundaries instead of the 1.x
+// session.status/session.idle properties.
+async function setupV2(context) {
+  if (typeof context?.event?.subscribe !== "function") return;
+  let activeSession = null;
+  void (async () => {
+    for await (const event of context.event.subscribe()) {
+      const type = event && event.type;
+      const sessionID = event && event.data && event.data.sessionID;
+      if (type === "session.execution.started") {
+        if (activeSession === null) activeSession = sessionID;
+        if (sessionID === activeSession) await busyEvent("busy", "session-execution-started");
+        continue;
+      }
+      if (
+        type === "session.execution.succeeded" ||
+        type === "session.execution.failed" ||
+        type === "session.execution.interrupted"
+      ) {
+        if (sessionID === activeSession) {
+          activeSession = null;
+          await busyEvent("idle", "session-" + type.slice("session.execution.".length));
+        }
+        await new Promise((resolve) => {
+          execFile("touch", ["$TURNEND"], () => resolve());
+        });
+        continue;
+      }
+      if (type === "session.status") {
+        const status = event.data && event.data.status;
+        const statusType = status && status.type;
+        if (statusType === "busy" || statusType === "retry") {
+          if (activeSession === null) activeSession = sessionID;
+          if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
+          continue;
+        }
+        if (statusType === "idle" && sessionID === activeSession) {
+          activeSession = null;
+          await busyEvent("idle", "session-status-idle");
+        }
+        continue;
+      }
+      if (type === "session.idle") {
+        if (sessionID === activeSession) {
+          activeSession = null;
+          await busyEvent("idle", "session-idle");
+        }
+        await new Promise((resolve) => {
+          execFile("touch", ["$TURNEND"], () => resolve());
+        });
+      }
+    }
+  })();
+}
+export default {
+  id: "fm.busy-state",
+  server: FmBusyState,
+  setup: setupV2,
+};
 EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'
     ;;
